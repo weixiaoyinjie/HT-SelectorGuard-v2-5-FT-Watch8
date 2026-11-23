@@ -1,4 +1,4 @@
-name: Build HT SelectorGuard v2.6 Phone and Watch8
+name: Build SelectorGuard v2.6 Phone and Watch8 - SDK Fixed
 
 on:
   workflow_dispatch:
@@ -7,62 +7,133 @@ on:
       - 'HT_SelectorGuard_v2_6_Notification_DirectMatch_Fix_OneUpload.zip'
       - '.github/workflows/build-apk.yml'
 
-permissions:
-  contents: read
-
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Set up Java 17
+      - name: Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Set up Gradle 8.10.2
+      - name: Gradle 8.10.2
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.10.2'
-
       - name: Unzip v2.6 complete source
+        shell: bash
         run: |
+          set -euo pipefail
           unzip -oq HT_SelectorGuard_v2_6_Notification_DirectMatch_Fix_OneUpload.zip
           test -f app/build.gradle
           test -f wear/build.gradle
+          test -f app/src/main/java/com/htlive/monitor/DetailPopupActivity.java
           test -f signing/watch8-development.jks
 
-      - name: Set up Android SDK 35
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android build dependencies
-        run: |
-          sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
-
-      - name: Run JavaScript regression tests
+      # Ubuntu GitHub-hosted runners include an Android SDK. Do not invoke
+      # android-actions/setup-android, which was failing before compilation.
+      - name: Use preinstalled Android SDK 35
         shell: bash
         run: |
-          shopt -s nullglob
-          for testfile in tests/*.test.js tests/selector/*.js tests/selector/*.cjs; do
-            node "$testfile"
+          set -euo pipefail
+          SDK_DIR="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          test -d "$SDK_DIR" || { echo "Android SDK directory not found: $SDK_DIR"; exit 1; }
+          echo "ANDROID_HOME=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_DIR" >> "$GITHUB_ENV"
+          echo "Checking Android SDK at $SDK_DIR"
+          ls -d "$SDK_DIR"/platforms/android-* "$SDK_DIR"/build-tools/* 2>/dev/null || true
+          if [ ! -d "$SDK_DIR/platforms/android-35" ] || [ ! -d "$SDK_DIR/build-tools/35.0.0" ]; then
+            SDKMANAGER="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+            if [ ! -x "$SDKMANAGER" ]; then
+              SDKMANAGER=$(find "$SDK_DIR/cmdline-tools" -type f -name sdkmanager -perm /111 | head -n 1 || true)
+            fi
+            test -n "$SDKMANAGER" && test -x "$SDKMANAGER" || { echo 'sdkmanager unavailable'; exit 1; }
+            echo 'Installing only missing Android SDK components...'
+            (yes | "$SDKMANAGER" --sdk_root="$SDK_DIR" --licenses >/dev/null) || true
+            "$SDKMANAGER" --sdk_root="$SDK_DIR" --install 'platforms;android-35' 'build-tools;35.0.0'
+          else
+            echo 'Android 35 platform and Build Tools 35.0.0 already installed; no download needed.'
+          fi
+          test -d "$SDK_DIR/platforms/android-35"
+          test -d "$SDK_DIR/build-tools/35.0.0"
+
+      - name: Test multi-match OCR, existing algorithms and 44mm payload
+        shell: bash
+        run: |
+          set -euo pipefail
+          for t in tests/*.test.js tests/selector/*.js tests/selector/*.cjs; do node "$t"; done
+          mkdir -p /tmp/selector-v23-tests
+          javac -encoding UTF-8 -d /tmp/selector-v23-tests \
+            app/src/main/java/com/htlive/monitor/SelectorSnapshotStore.java \
+            tests/java/com/htlive/monitor/SelectorSnapshotStoreTest.java
+          java -cp /tmp/selector-v23-tests com.htlive.monitor.SelectorSnapshotStoreTest
+          mkdir -p /tmp/ht-watch44-tests
+          javac -encoding UTF-8 -d /tmp/ht-watch44-tests \
+            tests/java/org/json/JSONObject.java tests/java/org/json/JSONArray.java \
+            app/src/main/java/com/htlive/monitor/AlertPolicy.java \
+            app/src/main/java/com/htlive/monitor/MatchLifecycle.java \
+            app/src/main/java/com/htlive/monitor/FullTimeMarkPolicy.java \
+            app/src/main/java/com/htlive/monitor/SelectorStartPolicy.java \
+            app/src/main/java/com/htlive/monitor/MainScoreRiskEngine.java \
+            app/src/main/java/com/htlive/monitor/ScoreGuardEngine.java \
+            app/src/main/java/com/htlive/monitor/Watch8NotificationFormatter.java \
+            app/src/main/java/com/htlive/monitor/Watch8CompanionPayload.java \
+            wear/src/main/java/com/htlive/watch44/WearBrief.java \
+            tests/java/com/htlive/watch44/WearBriefTest.java \
+            tests/java/com/htlive/monitor/AlertPolicyTest.java \
+            tests/java/com/htlive/monitor/FullTimeMarkPolicyTest.java \
+            tests/java/com/htlive/monitor/SelectorStartPolicyTest.java \
+            tests/java/com/htlive/monitor/MainScoreRiskEngineTest.java \
+            tests/java/com/htlive/monitor/ScoreGuardEngineTest.java \
+            tests/java/com/htlive/monitor/ScorePathTest.java \
+            tests/java/com/htlive/monitor/Watch8NotificationFormatterTest.java \
+            tests/java/com/htlive/monitor/Watch8CompanionPayloadTest.java
+          for c in SelectorStartPolicyTest AlertPolicyTest FullTimeMarkPolicyTest MainScoreRiskEngineTest ScoreGuardEngineTest ScorePathTest Watch8NotificationFormatterTest Watch8CompanionPayloadTest; do
+            java -cp /tmp/ht-watch44-tests "com.htlive.monitor.$c"
           done
-
-      - name: Compile phone and watch APKs
-        run: gradle :app:assembleDebug :wear:assembleDebug --no-daemon --stacktrace --console=plain
-
+          java -cp /tmp/ht-watch44-tests com.htlive.watch44.WearBriefTest
+      - name: Compile both APKs together with same debug signing identity
+        shell: bash
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug :wear:assembleDebug --no-daemon --stacktrace --console=plain 2>&1 | tee gradle-build.log
+      - name: Show compile error summary when build fails
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f gradle-build.log ]; then
+            echo '--- Java and Gradle compiler failures ---'
+            grep -n -E 'error:|FAILURE:|What went wrong:|Execution failed|cannot find symbol|package .* does not exist' gradle-build.log | tail -70 || true
+            echo '--- Last 100 build lines ---'
+            tail -100 gradle-build.log
+          fi
+      - name: Verify watch launcher declaration in source
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -q 'com.htlive.watch44.WatchHomeActivity' wear/src/main/AndroidManifest.xml
+          grep -q 'android.intent.category.LAUNCHER' wear/src/main/AndroidManifest.xml
+          grep -q 'android:icon="@drawable/ic_watch_score"' wear/src/main/AndroidManifest.xml
+          test -f wear/src/main/res/drawable/ic_watch_score.xml
+      - name: Verify both APKs exist
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s app/build/outputs/apk/debug/app-debug.apk
+          test -s wear/build/outputs/apk/debug/wear-debug.apk
       - name: Upload phone APK
         uses: actions/upload-artifact@v4
         with:
-          name: HT-v2.6-PHONE-APK
+          name: HT-v2.6-DirectMatch-PHONE-APK
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-
-      - name: Upload Watch8 APK
+      - name: Upload watch APK
         uses: actions/upload-artifact@v4
         with:
-          name: HT-v2.6-WATCH8-APK
+          name: HT-v2.6-DirectMatch-WATCH-APK
           path: wear/build/outputs/apk/debug/wear-debug.apk
           if-no-files-found: error
